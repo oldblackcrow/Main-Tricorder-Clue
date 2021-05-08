@@ -1,3 +1,5 @@
 Adafruit CLUE - nRF52840 Express with Bluetooth LE
 Make sure to follow the instructions for the Animated GIF Player (https://learn.adafruit.com/adafruit-clue/animated-gif-player), otherwise, the GIF will not work.
 Adafruit AMG8833 IR Thermal Camera Breakout
+
+This code was provided by Adafruit from their Clue Sensor Plotter (https://github.com/adafruit/Adafruit_Arcada/blob/master/examples/full_board_tests/arcada_clue_sensorplotter/arcada_clue_sensorplotter.ino) with their Animated GIF code. All this was integrated by notSpock on The Fleet Workshop.
