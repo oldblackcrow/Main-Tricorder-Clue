@@ -4,7 +4,9 @@ Adafruit AMG8833 IR Thermal Camera Breakout
 
 
 Software:
-There are two versions; the new version integrates Bluetooth to communicate with the Handheld sensor (SGP30 connected to the ItsyBitsy nRF52840 Express).
+There are three versions; 
+1. Integrates Bluetooth to communicate with the Handheld sensor (SGP30 connected to the ItsyBitsy nRF52840 Express)
+2. 
 
 Make sure to follow the instructions for the Animated GIF Player (https://learn.adafruit.com/adafruit-clue/animated-gif-player), otherwise, the GIF will not work.
 
