@@ -1,9 +1,9 @@
 Hardware:
 Adafruit CLUE - nRF52840 Express with Bluetooth LE
 
-Adafruit AMG8833 IR Thermal Camera Breakout
+Adafruit AMG8833 IR Thermal Camera Breakout (versions 1 & 2)
 OR
-Adafruit MLX90640 Thermal Camera
+Adafruit MLX90640 Thermal Camera (version 3)
 
 
 Software:
