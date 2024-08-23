@@ -3,11 +3,11 @@ Adafruit CLUE - nRF52840 Express with Bluetooth LE
 
 Adafruit AMG8833 IR Thermal Camera Breakout (versions 1 & 2)
 OR
-Adafruit MLX90640 Thermal Camera (version 3)
+Adafruit MLX90640 Thermal Camera (version 3 & 4)
 
 
 Software:
-There are three versions; 
+There are four versions; 
 1. Integrates the Moiré animated GIF with 9 internal sensors and the AMG8833
 2. Integrates the Moiré animated GIF, 9 internal sensors, the AMG8833, and Bluetooth to communicate with the Handheld sensors (SGP30 connected to the ItsyBitsy nRF52840 Express).
 3. Integrates the Moiré animated GIF, 9 internal sensors, the MLX90640, and Bluetooth to communicate with the Handheld sensors (SGP30 connected to the ItsyBitsy nRF52840 Express).
