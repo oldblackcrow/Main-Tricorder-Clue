@@ -8,10 +8,11 @@ Adafruit MLX90640 Thermal Camera (version 3 & 4)
 
 Software:
 There are four versions; 
-1. Integrates the Moiré animated GIF with 9 internal sensors and the AMG8833
-2. Integrates the Moiré animated GIF, 9 internal sensors, the AMG8833, and Bluetooth to communicate with the Handheld sensors (SGP30 connected to the ItsyBitsy nRF52840 Express).
-3. Integrates the Moiré animated GIF, 9 internal sensors, the MLX90640, and Bluetooth to communicate with the Handheld sensors (SGP30 connected to the ItsyBitsy nRF52840 Express).
-4. Integrates the Moiré animated GIF, 9 internal sensors, the MLX90640 (interpolated), and Bluetooth to communicate with the Handheld sensors (SGP30 connected to the ItsyBitsy nRF52840 Express), and button beeps.
+1. Integrates the Moiré animated GIF with 9 internal sensors and the **AMG8833**
+2. Integrates the Moiré animated GIF, 9 internal sensors, the **AMG8833**, and Bluetooth to communicate with the Handheld sensors (SGP30 connected to the ItsyBitsy nRF52840 Express).
+
+3. Integrates the Moiré animated GIF, 9 internal sensors, the **MLX90640**, and Bluetooth to communicate with the Handheld sensors (SGP30 connected to the ItsyBitsy nRF52840 Express).
+4. Integrates the Moiré animated GIF, 9 internal sensors, the **MLX90640** (interpolated), and Bluetooth to communicate with the Handheld sensors (SGP30 connected to the ItsyBitsy nRF52840 Express), and button beeps.
 
 Make sure to follow the instructions for the Animated GIF Player (https://learn.adafruit.com/adafruit-clue/animated-gif-player), otherwise, the GIF will not work.
 
