@@ -10,7 +10,7 @@
 #include <Arcada_GifDecoder.h>
 #include <Adafruit_MLX90640.h>
 
-// for Bluetooth communication with handheld sensor - added 4/22/22 by NotSpock
+// Bluetooth communication with handheld sensor - added 4/22/22 by NotSpock
 #include <bluefruit.h>
 BLEClientBas  clientBas;  // battery client
 BLEClientDis  clientDis;  // device information client
@@ -88,7 +88,7 @@ void plotBuffer(GFXcanvas16 *_canvas, const char *title,
                 CircularBuffer<float, PLOT_W> &buffer2, 
                 CircularBuffer<float, PLOT_W> &buffer3);
 
-// Buffer for our plot data
+// Buffer for plot data
 CircularBuffer<float, PLOT_W> data_buffer;
 CircularBuffer<float, PLOT_W> data_buffer2;
 CircularBuffer<float, PLOT_W> data_buffer3;
