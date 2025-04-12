@@ -5,6 +5,10 @@ Adafruit AMG8833 IR Thermal Camera Breakout (versions 1 & 2)
 OR
 Adafruit MLX90640 Thermal Camera (version 3 & 5)
 
+-----------------------------
+YOU MUST KNOW - when I updated the firmware and libraries on the Clue last month, I could NOT get the Animated GIF to work with the other screens. It worked fine on its own, but as soon as I added a second screen, the GIF was very crunchy and slow. This is why I wanted the Moiré to be software based on Version 5 instead of relying on an animated image. But if you haven't updated your Clue in a couple years, you should be able to get it to work.
+----------------------------
+
 Software:
 There are FIVE versions; 
 1. Integrates the Moiré animated GIF with 9 internal sensors and the **AMG8833**
@@ -21,8 +25,7 @@ There are FIVE versions;
    Mode6 - MLX90640 is still there looking all nice with minimum and maximum temps at the center of the screen.
    Also, in this version, the back button works no matter what screen you're on and there's a nice double beep for each button press. 
 
-If using versions 1 - 4, Make sure to follow the instructions for the Animated GIF Player (https://learn.adafruit.com/adafruit-clue/animated-gif-player), otherwise, the GIF will not work. But YOU MUST KNOW - when I updated the firmware and libraries on the Clue last month, I could NOT get the Animated GIF to work with the other screens. It worked fine on its own, but as soon as I added a second screen, the GIF was very crunchy and slow. This is why I wanted the Moiré to be software based instead of relying on an animated image. But if you haven't updated your Clue in a couple years, you should be able to get it to work.
-
+If using versions 1 - 4, Make sure to follow the instructions for the Animated GIF Player (https://learn.adafruit.com/adafruit-clue/animated-gif-player), otherwise, the GIF will not work. 
 If you have better luck than me with the Animated GIF, please fork the F out of this and let me know! Thanks!
 
 The animated GIF of the Moire pattern was supplied by CompaniaHill from The Fleet Workshop.
