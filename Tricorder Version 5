@@ -2,14 +2,11 @@
 
 #define ARDUINO_BLE_SKIP_BOARD_CHECK
 #include <bluefruit.h>
-
 #include <Arduino.h>
 #include <Adafruit_Arcada.h>
 #include <CircularBuffer.hpp>
 #include <Adafruit_GFX.h>
 #include <math.h>
-
-// PDM microphone library for dB Meter
 #include <PDM.h>
 
 // Sensor libraries:
@@ -711,7 +708,7 @@ void displayBTData() {
     dataColor = __builtin_bswap16(ARCADA_BLACK);
   }
 
-  // Updated co2VocColor: force black in WARNING mode.
+  // co2VocColor: force black in WARNING mode.
   uint16_t co2VocColor;
   if (level == NOMINAL) {
       co2VocColor = btConnected ? __builtin_bswap16(ARCADA_GREEN) : __builtin_bswap16(ARCADA_WHITE);
@@ -817,13 +814,7 @@ void displaySpaceTimeDistortion() {
   applyCircularMask(canvas);
 }
 
-// ----- [MODIFIED] Mode 6: MLX90640 IR Camera Display Function -----
-// Adjustments:
-//   - Increased interpolation resolution (see INTERPOLATED_WIDTH/HEIGHT)
-//   - Flipped the image horizontally (by inverting j)
-//   - Used ceil(...) for fillRect dimensions to reduce grid effects
-//   - Removed the circular mask so the full image is visible
-//   - Moved the min and max temperature labels to the middle of the screen
+// Mode 6: MLX90640 IR Camera Display Function
 void displayMLX90640() {
   GFXcanvas16 *canvas = arcada.getCanvas();
   if (!mlx_connected) {
