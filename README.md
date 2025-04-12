@@ -36,4 +36,4 @@ Versions 1 - 4 integration of the Moire pattern, AMG8833 thermal camera, and Blu
 
 The integration of the MLX90640 and most of Version 5 was created with the help of ChatGPT. Thanks to those folks who made that AI quite useful to me!
 
-Don't forget to subscribe to my YouTube channel so you can keep up with all the updates I make on the Tricorder! https://www.youtube.com/OldBlackCrowCS
+Don't forget to subscribe to my YouTube channel so you can keep up with all the updates I make on the Tricorder! http://www.youtube.com/@TheOldBlackCrow
