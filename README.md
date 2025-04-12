@@ -6,7 +6,7 @@ OR
 Adafruit MLX90640 Thermal Camera (version 3 & 5)
 
 -----------------------------
-YOU MUST KNOW - when I updated the firmware and libraries on the Clue last month, I could NOT get the Animated GIF to work with the other screens. It worked fine on its own, but as soon as I added a second screen, the GIF was very crunchy and slow. This is why I wanted the Moiré to be software based on Version 5 instead of relying on an animated image. But if you haven't updated your Clue in a couple years, you should be able to get it to work.
+YOU MUST KNOW - when I updated the firmware and libraries on the Clue last month, I could NOT get the Animated GIF to work with the other screens. It worked fine on its own, but as soon as I added a second screen, the GIF was very crunchy and slow. This is why I wanted the Moiré to be software-based in Version 5 instead of relying on an animated image. But if you haven't updated your Clue in a couple years, you should be able to get it to work.
 ----------------------------
 
 Software:
