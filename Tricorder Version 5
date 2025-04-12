@@ -1,0 +1,1184 @@
+// Tricorder Multi-Sensor with BLE Sensor Modes
+
+#define ARDUINO_BLE_SKIP_BOARD_CHECK
+#include <bluefruit.h>
+
+#include <Arduino.h>
+#include <Adafruit_Arcada.h>
+#include <CircularBuffer.hpp>
+#include <Adafruit_GFX.h>
+#include <math.h>
+
+// PDM microphone library for dB Meter
+#include <PDM.h>
+
+// Sensor libraries:
+#include <Adafruit_BMP280.h>
+#include <Adafruit_SHT31.h>
+#include <Adafruit_APDS9960.h>
+#include <Adafruit_LIS3MDL.h>
+#include <Adafruit_LSM6DS33.h>
+
+// ---------------- BLE Constants ----------------
+#define UART_SERVICE_UUID     "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define UART_TX_CHAR_UUID     "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+
+// ---------------- NEW: MLX90640 Setup (Mode 6) ----------------
+#include <Adafruit_MLX90640.h>
+static inline uint16_t myColor565(uint8_t r, uint8_t g, uint8_t b) {
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+Adafruit_MLX90640 mlx;
+float mlxFrame[32 * 24]; // Raw 32x24 frame from MLX90640
+// Increased interpolation resolution to reduce pixelation
+#define INTERPOLATED_WIDTH 128
+#define INTERPOLATED_HEIGHT 96
+float mlxInterpolatedFrame[INTERPOLATED_WIDTH * INTERPOLATED_HEIGHT];
+bool mlx_connected = false;
+
+// Interpolation function for the MLX90640 image:
+void interpolateThermalImage(float* input, int width, int height, int newWidth, int newHeight, float* output) {
+  float xRatio = (float)(width - 1) / (newWidth - 1);
+  float yRatio = (float)(height - 1) / (newHeight - 1);
+  for (int i = 0; i < newHeight; i++) {
+    for (int j = 0; j < newWidth; j++) {
+      int xL = (int)(xRatio * j);
+      int yL = (int)(yRatio * i);
+      float xH = xRatio * j - xL;
+      float yH = yRatio * i - yL;
+      float v1 = input[yL * width + xL];
+      float v2 = input[yL * width + (xL + 1)];
+      float v3 = input[(yL + 1) * width + xL];
+      float v4 = input[(yL + 1) * width + (xL + 1)];
+      output[i * newWidth + j] = (v1 * (1 - xH) * (1 - yH)) +
+                                 (v2 * xH * (1 - yH)) +
+                                 (v3 * (1 - xH) * yH) +
+                                 (v4 * xH * yH);
+    }
+  }
+}
+
+// ---------- Global Macro Definitions Needed by Prototypes ----------
+#define PLOT_TOPBUFFER    20
+#define PLOT_LEFTBUFFER   40
+#define PLOT_BOTTOMBUFFER 20
+#define PLOT_W (ARCADA_TFT_WIDTH - PLOT_LEFTBUFFER)
+#define PLOT_H (ARCADA_TFT_HEIGHT - PLOT_BOTTOMBUFFER - PLOT_TOPBUFFER)
+
+// ---------- Forward Declaration for mapf ----------
+float mapf(float x, float in_min, float in_max, float out_min, float out_max);
+
+// ---------- TOS Star Trek Palette ----------
+#define TOS_YELLOW       __builtin_bswap16(0xFE60)  // from #fdcd06 (RGB: 253,205,6)
+#define TOS_YELLOWGREEN  __builtin_bswap16(0xBA45)  // from #b9c92f (RGB: 185,201,47)
+#define TOS_RED          __builtin_bswap16(0xB861)  // from #bf0f0f (RGB: 191,15,15)
+#define TOS_BLUE         __builtin_bswap16(0x12F8)  // from #165fc5 (RGB: 22,95,197)
+#define TOS_TEAL         __builtin_bswap16(0x1393)  // from #11709f (RGB: 17,112,159)
+#define TOS_WHITE        __builtin_bswap16(0xFFFF)
+
+// ---------------- Buzzer (Button Beep) Definitions ----------------
+// The tiny buzzer is on D46.
+#define BUZZER_PIN 46
+
+// Generate a tone at a given frequency (Hz) for a given duration (ms)
+void beep(int frequency, int duration) {
+  tone(BUZZER_PIN, frequency, duration);
+  delay(duration);
+  noTone(BUZZER_PIN);
+}
+
+// Beep Pattern 2: Two quick beeps at 1200 Hz, each lasting 50ms.
+void beepPattern2() {
+  beep(1200, 50);
+  delay(50);
+  beep(1200, 50);
+  delay(100);
+}
+
+// ---------------- Function Prototypes ----------------
+void displayRadialMoire();
+void displayCircularLuxGauge();
+void plotColorBuffer(GFXcanvas16 *canvas, CircularBuffer<float, PLOT_W> &redBuf,
+                     CircularBuffer<float, PLOT_W> &greenBuf, CircularBuffer<float, PLOT_W> &blueBuf,
+                     const char *title);
+void displayBTData();
+void displaySpaceTimeDistortion();
+void displayMLX90640();
+void displayDBMeter();
+
+// ---------------- Global Definitions ----------------
+#define COLOR_WHITE 0xFFFF
+#define COLOR_BLACK 0x0000
+
+#define BACKGROUND_COLOR __builtin_bswap16(ARCADA_BLACK)
+#define BORDER_COLOR     __builtin_bswap16(TOS_BLUE)
+#define PLOT_COLOR_1     __builtin_bswap16(TOS_YELLOW)
+#define TITLE_COLOR      __builtin_bswap16(ARCADA_WHITE)
+#define TICKTEXT_COLOR   __builtin_bswap16(ARCADA_WHITE)
+#define TICKLINE_COLOR   __builtin_bswap16(ARCADA_DARKGREY)
+
+#define PLOT_RED   __builtin_bswap16(ARCADA_RED)
+#define PLOT_GREEN __builtin_bswap16(ARCADA_GREEN)
+#define PLOT_BLUE  __builtin_bswap16(ARCADA_BLUE)
+
+#define TEMP_DANGER_THRESHOLD 35.0
+#define HI_DANGER_THRESHOLD   46.0
+#define TEMP_WARNING_THRESHOLD 40.5
+#define HI_WARNING_THRESHOLD   41.0
+
+#define DELAY_PER_SAMPLE 50
+#define WHITE_LED 43
+
+// ---------------- Global Objects ----------------
+Adafruit_Arcada arcada;
+Adafruit_BMP280 bmp;
+Adafruit_SHT31 sht = Adafruit_SHT31();
+Adafruit_APDS9960 apds = Adafruit_APDS9960();
+Adafruit_LIS3MDL mag;
+Adafruit_LSM6DS33 lsm6ds33;
+
+CircularBuffer<float, PLOT_W> lightBuffer;   // Mode 1: Light Intensity
+CircularBuffer<float, PLOT_W> redBuffer;     // Mode 2: Colorimeter (Red)
+CircularBuffer<float, PLOT_W> greenBuffer;   // Mode 2: Colorimeter (Green)
+CircularBuffer<float, PLOT_W> blueBuffer;    // Mode 2: Colorimeter (Blue)
+
+// ---------------- Mode 3 dB Meter Globals ----------------
+short sampleBuffer[256];
+volatile int samplesRead = 0;
+float currentDB = 0;
+float minDB = 1000.0;
+float maxDB = 0;
+
+int maxRadius;
+const float sweepArcWidth = 60.0;
+const float sweepSpeed = 3.0;
+float sweepAngle = 0.0;
+
+// ---------------- Other Globals ----------------
+uint32_t lastSampleTime = 0;
+int currentMode = 0;
+unsigned long lastModeChangeTime = 0;
+int prevMode = -1;
+
+// ---------------- BLE Global Variables ----------------
+BLEClientUart clientUart;
+BLEClientBas  clientBas;
+BLEClientDis  clientDis;
+int16_t voc_val = 0;
+int16_t eco2_val = 0;
+String btData = "";
+
+// ---------------- More Globals ----------------
+#define NEXT_BUTTON     ARCADA_BUTTONMASK_RIGHT
+#define PREV_BUTTON     ARCADA_BUTTONMASK_LEFT
+#define BRIGHTER_BUTTON ARCADA_BUTTONMASK_UP
+#define DIMMER_BUTTON   ARCADA_BUTTONMASK_DOWN
+
+float prevAx = 0, prevAy = 0, prevAz = 0;
+float hpAx = 0, hpAy = 0, hpAz = 0;
+bool lsmInitialized = false;
+
+// MODE 0: Radial Moiré Pattern
+
+const int NUM_RADIAL_LINES = 80;
+const int RADIAL_LINE_CENTER_THICKNESS = 1;
+const int RADIAL_LINE_EDGE_THICKNESS = 10;
+const int RADIAL_LINE_STEP = 24;
+
+float topGridRotation = 0.0;
+float topGridScale = 1.0;
+
+float baselineX, baselineY, baselineZ, baselineHeading;
+bool calibrated = false;
+
+const float OFFSET_FACTOR = 5.0;
+const float SCALE_FACTOR = 50.0;
+const int OFFSET_LIMIT = 40;
+
+static int globalWidth, globalHeight;
+static int globalCx, globalCy;
+static int globalMaxR;
+static float globalAngleStep;
+const float DEG2RAD = PI / 180.0;
+
+static float sinLUT[360];
+static float cosLUT[360];
+
+static inline void drawThickLine(GFXcanvas16 *canvas, int x0, int y0, int x1, int y1, uint16_t color, int thickness) {
+  float dx = x1 - x0, dy = y1 - y0;
+  float dist = sqrt(dx * dx + dy * dy);
+  if (dist == 0) dist = 1;
+  int half = thickness / 2;
+  for (int i = -half; i <= half; i++) {
+    int offsetX = round(i * (-dy) / dist);
+    int offsetY = round(i * (dx) / dist);
+    canvas->drawLine(x0 + offsetX, y0 + offsetY, x1 + offsetX, y1 + offsetY, color);
+  }
+}
+
+static inline void drawGradientRadialLineWithColorScaled(GFXcanvas16 *canvas, int cx, int cy, float angleRad, int maxR,
+                                           int centerThickness, int edgeThickness, int step,
+                                           float scale, uint16_t color) {
+  int angleDeg = ((int)round(angleRad * 180.0 / PI)) % 360;
+  if (angleDeg < 0) angleDeg += 360;
+  float c = sinLUT[angleDeg];  // using lookup tables (swapped for consistency)
+  float s = cosLUT[angleDeg];
+  for (int r = 0; r < maxR; r += step) {
+    float t = (float)r / maxR;
+    int currentThickness = centerThickness + (int)((edgeThickness - centerThickness) * t);
+    int x0 = globalCx + (int)(r * scale * c);
+    int y0 = globalCy + (int)(r * scale * s);
+    int x1 = globalCx + (int)((r + step) * scale * c);
+    int y1 = globalCy + (int)((r + step) * scale * s);
+    drawThickLine(canvas, x0, y0, x1, y1, color, currentThickness);
+  }
+}
+
+static inline void drawBottomRadialLinesPattern(GFXcanvas16 *canvas) {
+  for (int i = 0; i < NUM_RADIAL_LINES; i++) {
+    float angleDeg = i * globalAngleStep;
+    float angleRad = angleDeg * DEG2RAD;
+    drawGradientRadialLineWithColorScaled(canvas, globalCx, globalCy, angleRad, globalMaxR,
+        RADIAL_LINE_CENTER_THICKNESS, RADIAL_LINE_EDGE_THICKNESS, RADIAL_LINE_STEP, 1.0, COLOR_BLACK);
+  }
+  canvas->fillCircle(globalCx, globalCy, 3, COLOR_BLACK);
+}
+
+static inline void drawTopRadialLinesPattern(GFXcanvas16 *canvas, float scale, int offsetX, int offsetY) {
+  int topCx = globalCx + offsetX;
+  int topCy = globalCy + offsetY;
+  for (int i = 0; i < NUM_RADIAL_LINES; i++) {
+    float angleDeg = i * globalAngleStep;
+    angleDeg += topGridRotation;
+    float angleRad = angleDeg * DEG2RAD;
+    float c = cos(angleRad);
+    float s = sin(angleRad);
+    for (int r = 0; r < globalMaxR; r += RADIAL_LINE_STEP) {
+      float t = (float)r / globalMaxR;
+      int currentThickness = RADIAL_LINE_CENTER_THICKNESS + (int)((RADIAL_LINE_EDGE_THICKNESS - RADIAL_LINE_CENTER_THICKNESS) * t);
+      int x0 = topCx + (int)(r * scale * c);
+      int y0 = topCy + (int)(r * scale * s);
+      int x1 = topCx + (int)((r + RADIAL_LINE_STEP) * scale * c);
+      int y1 = topCy + (int)((r + RADIAL_LINE_STEP) * scale * s);
+      drawThickLine(canvas, x0, y0, x1, y1, COLOR_BLACK, currentThickness);
+    }
+  }
+  canvas->fillCircle(globalCx, globalCy, 3, COLOR_BLACK);
+}
+
+// ----- Mode 0 Display Function -----
+void displayRadialMoire() {
+  sensors_event_t event;
+  mag.getEvent(&event);
+  
+  float heading = atan2(event.magnetic.y, event.magnetic.x) * 180.0 / PI;
+  if (heading < 0) heading += 360.0;
+  
+  if (!calibrated) {
+    baselineX = event.magnetic.x;
+    baselineY = event.magnetic.y;
+    baselineZ = event.magnetic.z;
+    baselineHeading = heading;
+    calibrated = true;
+  }
+  
+  float deltaX = event.magnetic.x - baselineX;
+  float deltaY = event.magnetic.y - baselineY;
+  float deltaZ = event.magnetic.z - baselineZ;
+  float deltaHeading = heading - baselineHeading;
+  
+  topGridRotation = deltaHeading;
+  topGridScale = 1.0 + (deltaZ / SCALE_FACTOR);
+  if (topGridScale < 0.8) topGridScale = 0.8;
+  if (topGridScale > 1.2) topGridScale = 1.2;
+
+  int dynamicOffsetX = 20 + (int)(deltaX * OFFSET_FACTOR);
+  int dynamicOffsetY = (int)(deltaY * OFFSET_FACTOR);
+  if (dynamicOffsetX > OFFSET_LIMIT) dynamicOffsetX = OFFSET_LIMIT;
+  if (dynamicOffsetX < -OFFSET_LIMIT) dynamicOffsetX = -OFFSET_LIMIT;
+  if (dynamicOffsetY > OFFSET_LIMIT) dynamicOffsetY = OFFSET_LIMIT;
+  if (dynamicOffsetY < -OFFSET_LIMIT) dynamicOffsetY = -OFFSET_LIMIT;
+
+  
+  GFXcanvas16 *canvas = arcada.getCanvas();
+  canvas->fillScreen(COLOR_WHITE);
+  
+  drawBottomRadialLinesPattern(canvas);
+  drawTopRadialLinesPattern(canvas, topGridScale, dynamicOffsetX, dynamicOffsetY);
+  
+  float fieldStrength = sqrt(event.magnetic.x * event.magnetic.x +
+                             event.magnetic.y * event.magnetic.y +
+                             event.magnetic.z * event.magnetic.z);
+  
+  char headingBuf[20];
+  snprintf(headingBuf, sizeof(headingBuf), "Hd=%g", heading);
+  char fieldBuf[20];
+  snprintf(fieldBuf, sizeof(fieldBuf), "%.1fuT", fieldStrength);
+  
+  canvas->setTextSize(2);
+  int charWidth = 12;
+  int charHeight = 12;
+  
+  int headingWidth = strlen(headingBuf) * charWidth;
+  int fieldWidth = strlen(fieldBuf) * charWidth;
+  
+  int headingX = (canvas->width() - headingWidth) / 2;
+  int headingY = 25;
+  
+  int fieldX = (canvas->width() - fieldWidth) / 2;
+  int fieldY = canvas->height() - 25 - charHeight;
+  
+  int padding = 2;
+  canvas->fillRect(headingX - padding, headingY - padding, headingWidth + 2 * padding, charHeight + 2 * padding, COLOR_WHITE);
+  canvas->fillRect(fieldX - padding, fieldY - padding, fieldWidth + 2 * padding, charHeight + 2 * padding, COLOR_WHITE);
+  
+  canvas->setTextColor(PLOT_RED);
+  // Print the heading text twice with a 1-pixel offset to simulate bold text.
+  canvas->setCursor(headingX, headingY);
+  canvas->print(headingBuf);
+  canvas->setCursor(headingX + 1, headingY);
+  canvas->print(headingBuf);
+  
+  canvas->setCursor(fieldX, fieldY);
+  canvas->print(fieldBuf);
+  canvas->setCursor(fieldX + 1, fieldY);
+  canvas->print(fieldBuf);
+  delay(30);
+}
+
+// ----- Mode 1 Display Function -----
+void displayCircularLuxGauge() {
+  GFXcanvas16 *canvas = arcada.getCanvas();
+  canvas->fillScreen(TOS_TEAL);
+  
+  int16_t gaugeX = 120;
+  int16_t gaugeY = 120;
+  
+  int16_t radius = min(canvas->width(), canvas->height()) / 2 - 10;
+  canvas->drawCircle(gaugeX, gaugeY, radius, TOS_YELLOWGREEN);
+  
+  float gaugeSweep = 270.0;
+  float startAngle = -135.0;
+  
+  float lux = 0;
+  if (lightBuffer.size() > 0) {
+    lux = lightBuffer[lightBuffer.size() - 1];
+  }
+  float maxLux = 1000.0;
+  if (lux < 0) lux = 0;
+  if (lux > maxLux) lux = maxLux;
+  
+  float arcAngle = mapf(lux, 0, maxLux, 0, gaugeSweep);
+  
+  uint16_t arcColor = (lux < maxLux / 2) ? TOS_YELLOW : TOS_RED;
+  
+  for (float angle = startAngle; angle <= startAngle + arcAngle; angle += 2.0) {
+    float rad = angle * PI / 180.0;
+    for (int rOffset = 2; rOffset <= 10; rOffset++) {
+      int16_t x = gaugeX + (radius - rOffset) * cos(rad);
+      int16_t y = gaugeY + (radius - rOffset) * sin(rad);
+      canvas->drawPixel(x, y, arcColor);
+    }
+  }
+  
+  char label[16];
+  snprintf(label, sizeof(label), "%4.1f lx", lux);
+  uint16_t textWidth = strlen(label) * 12;
+  int16_t luxTextX = gaugeX - textWidth / 2;
+  int16_t luxTextY = gaugeY - 10;
+  int padding = 2;
+  int backgroundYOffset = 5;
+  canvas->fillRect(luxTextX - padding, luxTextY + backgroundYOffset - padding,
+                 textWidth + 2 * padding, 12 + 2 * padding, TOS_BLUE);
+
+  canvas->setTextSize(3);
+  canvas->setTextColor(TOS_WHITE);
+  canvas->setCursor(luxTextX, luxTextY);
+  canvas->print(label);
+}
+
+// ----- Mode 3 dB Meter Functions -----
+struct Blip {
+  float angle;
+  float relRadius;
+  unsigned long timestamp;
+  float amplitude;
+};
+#define MAX_BLIPS 10
+#define BLIP_LIFETIME 1000
+Blip blips[10];
+int numBlips = 0;
+
+void dbDrawConcentricCircles(GFXcanvas16 *canvas, int cx, int cy) {
+  float dbMin = 40.0;
+  float dbMax = 120.0;
+  float dbStep = 20.0;
+  float labelAngles[5] = {0, 60, 120, 180, 240};
+  int index = 0;
+  
+  for (float db = dbMin; db <= dbMax && index < 5; db += dbStep, index++) {
+    int r = (int)(((db - dbMin) / (dbMax - dbMin)) * maxRadius);
+    if (r > 0) {
+      canvas->drawCircle(cx, cy, r, __builtin_bswap16(ARCADA_YELLOW));
+      float radLabel = labelAngles[index] * PI / 180.0;
+      int labelX = cx + (int)((r + 5) * cos(radLabel));
+      int labelY = cy + (int)((r + 5) * sin(radLabel));
+      canvas->setTextSize(2);
+      canvas->setTextColor(__builtin_bswap16(ARCADA_YELLOW));
+      canvas->setCursor(labelX, labelY);
+      canvas->print((int)db);
+    }
+  }
+}
+
+void dbDrawRadialGrid(GFXcanvas16 *canvas, int cx, int cy, int radius) {
+  for (int i = 0; i < 12; i++) {
+    float angle = i * 30.0 * PI / 180.0;
+    int x = cx + (int)(radius * cos(angle));
+    int y = cy + (int)(radius * sin(angle));
+    canvas->drawLine(cx, cy, x, y, __builtin_bswap16(TOS_YELLOW));
+  }
+}
+
+void dbDrawSweepArc(GFXcanvas16 *canvas, int cx, int cy, int radius, float startAngle, float arcWidth) {
+  const float degToRad = PI / 180.0;
+  for (float a = startAngle; a <= startAngle + arcWidth; a += 2.0) {
+    float aRad = a * degToRad;
+    int x = cx + (int)(radius * cos(aRad));
+    int y = cy + (int)(radius * sin(aRad));
+    canvas->drawLine(cx, cy, x, y, __builtin_bswap16(TOS_YELLOW));
+    canvas->drawLine(cx + 1, cy, x + 1, y, __builtin_bswap16(TOS_YELLOW));
+  }
+}
+
+void dbDrawCenterMarker(GFXcanvas16 *canvas, int cx, int cy) {
+  canvas->fillCircle(cx, cy, 5, __builtin_bswap16(ARCADA_YELLOW));
+}
+
+void dbDrawBlips(GFXcanvas16 *canvas, int cx, int cy) {
+  unsigned long now = millis();
+  for (int i = 0; i < numBlips; i++) {
+    if (now - blips[i].timestamp > BLIP_LIFETIME)
+      continue;
+    int blipR = (int)(blips[i].relRadius * maxRadius);
+    float aRad = blips[i].angle * PI / 180.0;
+    int x = cx + (int)(blipR * cos(aRad));
+    int y = cy + (int)(blipR * sin(aRad));
+    canvas->fillCircle(x, y, 3, __builtin_bswap16(ARCADA_RED));
+  }
+}
+
+void displayDBMeter() {
+  GFXcanvas16 *canvas = arcada.getCanvas();
+  canvas->fillScreen(ARCADA_BLACK);
+  int cx = canvas->width() / 2;
+  int cy = canvas->height() / 2;
+  maxRadius = min(cx, cy) - 10;
+  
+  dbDrawConcentricCircles(canvas, cx, cy);
+  dbDrawRadialGrid(canvas, cx, cy, maxRadius);
+  dbDrawSweepArc(canvas, cx, cy, maxRadius, sweepAngle, sweepArcWidth);
+  dbDrawCenterMarker(canvas, cx, cy);
+  dbDrawBlips(canvas, cx, cy);
+}
+
+void addBlipDB(float amplitude) {
+  if (numBlips < MAX_BLIPS) {
+    float randomFactor = random(0, 1000) / 1000.0;
+    float blipAngle = sweepAngle + randomFactor * sweepArcWidth;
+    float dbMin = 40.0;
+    float dbMax = 120.0;
+    float relRadius = (currentDB - dbMin) / (dbMax - dbMin);
+    if (relRadius < 0) relRadius = 0;
+    if (relRadius > 1) relRadius = 1;
+    blips[numBlips].angle = blipAngle;
+    blips[numBlips].relRadius = relRadius;
+    blips[numBlips].timestamp = millis();
+    blips[numBlips].amplitude = amplitude;
+    numBlips++;
+  }
+}
+
+void updateBlipsDB() {
+  unsigned long now = millis();
+  int writeIndex = 0;
+  for (int i = 0; i < numBlips; i++) {
+    if (now - blips[i].timestamp <= BLIP_LIFETIME) {
+      if (writeIndex != i) {
+        blips[writeIndex] = blips[i];
+      }
+      writeIndex++;
+    }
+  }
+  numBlips = writeIndex;
+}
+
+// ----- Helper Functions -----
+float mapf(float x, float in_min, float in_max, float out_min, float out_max) {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+uint16_t HSVtoRGB(uint16_t h, uint8_t s, uint8_t v) {
+  uint8_t r, g, b;
+  uint16_t region = h / 60;
+  uint16_t remainder = (h - (region * 60)) * 255 / 60;
+  uint8_t p = (v * (255 - s)) / 255;
+  uint8_t q = (v * (255 - ((s * remainder) / 255))) / 255;
+  uint8_t t = (v * (255 - ((s * (255 - remainder)) / 255))) / 255;
+  switch (region) {
+    case 0: r = v; g = t; b = p; break;
+    case 1: r = q; g = v; b = p; break;
+    case 2: r = p; g = v; b = t; break;
+    case 3: r = p; g = q; b = v; break;
+    case 4: r = t; g = p; b = v; break;
+    default: r = v; g = p; b = q; break;
+  }
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+void printLabel(GFXcanvas16 *canvas, uint16_t x, uint16_t y, float val) {
+  char label[20];
+  if (abs(val) < 1)
+    snprintf(label, 19, "%0.2f", val);
+  else if (abs(val) < 10)
+    snprintf(label, 19, "%0.1f", val);
+  else
+    snprintf(label, 19, "%d", (int)val);
+  canvas->setCursor(PLOT_LEFTBUFFER - strlen(label) * 6 - 5, y);
+  canvas->print(label);
+}
+
+void printTicks(GFXcanvas16 *canvas, uint8_t ticks, float minY, float maxY) {
+  canvas->setTextSize(1);
+  canvas->setTextColor(TICKTEXT_COLOR);
+  for (int t = 0; t < ticks; t++) {
+    float v = map(t, 0, ticks - 1, minY, maxY);
+    uint16_t y = map(t, 0, ticks - 1, ARCADA_TFT_HEIGHT - PLOT_BOTTOMBUFFER - 4, PLOT_TOPBUFFER);
+    printLabel(canvas, 0, y, v);
+    uint16_t line_y = map(t, 0, ticks - 1, ARCADA_TFT_HEIGHT - PLOT_BOTTOMBUFFER, PLOT_TOPBUFFER);
+    canvas->drawLine(PLOT_LEFTBUFFER, line_y, ARCADA_TFT_WIDTH, line_y, TICKLINE_COLOR);
+  }
+}
+
+void applyCircularMask(GFXcanvas16 *canvas) {
+  int16_t cx = canvas->width() / 2;
+  int16_t cy = canvas->height() / 2;
+  int16_t radius = min(cx, cy) - 10;
+  uint32_t radiusSq = (uint32_t)radius * radius;
+  for (int16_t y = 0; y < canvas->height(); y++) {
+    for (int16_t x = 0; x < canvas->width(); x++) {
+      int16_t dx = x - cx;
+      int16_t dy = y - cy;
+      if ((uint32_t)(dx * dx + dy * dy) > radiusSq) {
+        canvas->drawPixel(x, y, BACKGROUND_COLOR);
+      }
+    }
+  }
+}
+
+void plotBuffer(GFXcanvas16 *canvas, CircularBuffer<float, PLOT_W> &buffer, const char *title) {
+  canvas->fillScreen(BACKGROUND_COLOR);
+  canvas->drawLine(PLOT_LEFTBUFFER - 1, PLOT_TOPBUFFER,
+                   PLOT_LEFTBUFFER - 1, PLOT_TOPBUFFER + PLOT_H, BORDER_COLOR);
+  canvas->drawLine(PLOT_LEFTBUFFER - 1, PLOT_TOPBUFFER + PLOT_H + 1,
+                   ARCADA_TFT_WIDTH, PLOT_TOPBUFFER + PLOT_H + 1, BORDER_COLOR);
+  canvas->setTextSize(3);
+  canvas->setTextColor(TITLE_COLOR);
+  uint16_t title_len = strlen(title) * 12;
+  canvas->setCursor((canvas->width() - title_len) / 2, 20);
+  canvas->print(title);
+  
+  float minY = 0, maxY = 0;
+  if (buffer.size() > 0) { minY = maxY = buffer[0]; }
+  for (int i = 0; i < buffer.size(); i++) {
+    minY = min(minY, buffer[i]);
+    maxY = max(maxY, buffer[i]);
+  }
+  float MIN_DELTA = 10.0;
+  if (maxY - minY < MIN_DELTA) {
+    float mid = (maxY + minY) / 2;
+    maxY = mid + MIN_DELTA / 2;
+    minY = mid - MIN_DELTA / 2;
+  } else {
+    float extra = (maxY - minY) / 10;
+    maxY += extra;
+    minY -= extra;
+  }
+  printTicks(canvas, 5, minY, maxY);
+  
+  int16_t last_y = 0, last_x = 0;
+  for (int i = 0; i < buffer.size(); i++) {
+    int16_t y = (int16_t)mapf(buffer[i], minY, maxY, PLOT_TOPBUFFER + PLOT_H, PLOT_TOPBUFFER);
+    int16_t x = PLOT_LEFTBUFFER + i;
+    if (i == 0) { last_y = y; last_x = x; }
+    canvas->drawLine(last_x, last_y, x, y, PLOT_COLOR_1);
+    last_x = x; last_y = y;
+  }
+  applyCircularMask(canvas);
+}
+
+void plotColorBuffer(GFXcanvas16 *canvas,
+                     CircularBuffer<float, PLOT_W> &redBuf,
+                     CircularBuffer<float, PLOT_W> &greenBuf,
+                     CircularBuffer<float, PLOT_W> &blueBuf,
+                     const char *title) {
+  canvas->fillScreen(BACKGROUND_COLOR);
+  canvas->drawLine(PLOT_LEFTBUFFER - 1, PLOT_TOPBUFFER,
+                   PLOT_LEFTBUFFER - 1, PLOT_TOPBUFFER + PLOT_H, BORDER_COLOR);
+  canvas->drawLine(PLOT_LEFTBUFFER - 1, PLOT_TOPBUFFER + PLOT_H + 1,
+                   ARCADA_TFT_WIDTH, PLOT_TOPBUFFER + PLOT_H + 1, BORDER_COLOR);
+  canvas->setTextSize(3);
+  canvas->setTextColor(TITLE_COLOR);
+  uint16_t title_len = strlen(title) * 12;
+  canvas->setCursor((canvas->width() - title_len) / 2, 20);
+  canvas->print(title);
+  
+  float minVal = 1e6, maxVal = -1e6;
+  for (int i = 0; i < redBuf.size(); i++) {
+    minVal = min(minVal, redBuf[i]);
+    maxVal = max(maxVal, redBuf[i]);
+  }
+  for (int i = 0; i < greenBuf.size(); i++) {
+    minVal = min(minVal, greenBuf[i]);
+    maxVal = max(maxVal, greenBuf[i]);
+  }
+  for (int i = 0; i < blueBuf.size(); i++) {
+    minVal = min(minVal, blueBuf[i]);
+    maxVal = max(maxVal, blueBuf[i]);
+  }
+  float MIN_DELTA = 10.0;
+  if (maxVal - minVal < MIN_DELTA) {
+    float mid = (maxVal + minVal) / 2;
+    maxVal = mid + MIN_DELTA / 2;
+    minVal = mid - MIN_DELTA / 2;
+  } else {
+    float extra = (maxVal - minVal) / 10;
+    maxVal += extra;
+    minVal -= extra;
+  }
+  printTicks(canvas, 5, minVal, maxVal);
+  
+  int16_t last_red = 0, last_green = 0, last_blue = 0, last_x = 0;
+  for (int i = 0; i < redBuf.size(); i++) {
+    int16_t x = PLOT_LEFTBUFFER + i;
+    int16_t redY = (int16_t)mapf(redBuf[i], minVal, maxVal, PLOT_TOPBUFFER + PLOT_H, PLOT_TOPBUFFER);
+    int16_t greenY = (int16_t)mapf(greenBuf[i], minVal, maxVal, PLOT_TOPBUFFER + PLOT_H, PLOT_TOPBUFFER);
+    int16_t blueY = (int16_t)mapf(blueBuf[i], minVal, maxVal, PLOT_TOPBUFFER + PLOT_H, PLOT_TOPBUFFER);
+    if (i == 0) { last_red = redY; last_green = greenY; last_blue = blueY; last_x = x; }
+    canvas->drawLine(last_x, last_red, x, redY, PLOT_RED);
+    canvas->drawLine(last_x, last_green, x, greenY, PLOT_GREEN);
+    canvas->drawLine(last_x, last_blue, x, blueY, PLOT_BLUE);
+    last_red = redY; last_green = greenY; last_blue = blueY; last_x = x;
+  }
+  applyCircularMask(canvas);
+}
+
+void displayBTData() {
+  GFXcanvas16 *canvas = arcada.getCanvas();
+  #define TEMP_OFFSET -8.2
+  float t = bmp.readTemperature() + TEMP_OFFSET;
+  float h = sht.readHumidity();
+  float tF = t * 9.0 / 5.0 + 32.0;
+  float hiF;
+  if (tF < 80) {
+      hiF = tF;
+  } else {
+      hiF = -42.379 + 2.04901523 * tF + 10.14333127 * h - 0.22475541 * tF * h 
+            - 6.83783e-3 * tF * tF - 5.481717e-2 * h * h 
+            + 1.22874e-3 * tF * tF * h + 8.5282e-4 * tF * h * h - 1.99e-6 * tF * tF * h * h;
+  }
+  float hiC = (hiF - 32) * 5.0 / 9.0;
+  enum AirQuality { NOMINAL, WARNING, DANGER };
+  AirQuality level;
+  if (eco2_val >= 1200 || voc_val >= 500 || t >= TEMP_DANGER_THRESHOLD || hiC >= HI_DANGER_THRESHOLD) {
+    level = DANGER;
+  } else if (eco2_val >= 800 || voc_val >= 250 || t >= TEMP_WARNING_THRESHOLD || hiC >= HI_WARNING_THRESHOLD) {
+    level = WARNING;
+  } else {
+    level = NOMINAL;
+  }
+
+  uint16_t bgColor, dataColor;
+  bool btConnected = Bluefruit.Central.connected();
+  if (level == NOMINAL) {
+    bgColor = TOS_BLUE;
+    dataColor = __builtin_bswap16(ARCADA_WHITE);
+  } else if (level == WARNING) {
+    bgColor = __builtin_bswap16(ARCADA_YELLOW);
+    dataColor = __builtin_bswap16(ARCADA_BLACK);
+  } else {
+    bgColor = __builtin_bswap16(ARCADA_RED);
+    dataColor = __builtin_bswap16(ARCADA_BLACK);
+  }
+
+  // Updated co2VocColor: force black in WARNING mode.
+  uint16_t co2VocColor;
+  if (level == NOMINAL) {
+      co2VocColor = btConnected ? __builtin_bswap16(ARCADA_GREEN) : __builtin_bswap16(ARCADA_WHITE);
+  } else if (level == WARNING) {
+      co2VocColor = __builtin_bswap16(ARCADA_BLACK);
+  } else { // DANGER
+      co2VocColor = btConnected ? __builtin_bswap16(ARCADA_GREEN) : __builtin_bswap16(ARCADA_BLACK);
+  }
+
+  canvas->fillScreen(bgColor);
+  int16_t cx = canvas->width() / 2;
+  int16_t cy = canvas->height() / 2;
+  int16_t radius = min(cx, cy) - 10;
+  canvas->drawCircle(cx, cy, radius, BORDER_COLOR);
+
+  canvas->setTextSize(3);
+  canvas->setTextColor(__builtin_bswap16(ARCADA_GREEN));
+  const char *sensorName = "ENV";
+  canvas->setCursor(95, cy - 100);
+  canvas->print(sensorName);
+
+  char buffer[20];
+
+  snprintf(buffer, sizeof(buffer), "CO2:%dppm", eco2_val);
+  canvas->setTextSize(2);
+  canvas->setTextColor(co2VocColor);
+  canvas->setCursor(40, 160);
+  canvas->print(buffer);
+
+  snprintf(buffer, sizeof(buffer), "VOC:%dppb", voc_val);
+  canvas->setCursor(55, 185);
+  canvas->print(buffer);
+
+  canvas->setTextSize(2);
+  canvas->setTextColor(dataColor);
+  canvas->setCursor(30, 100);
+  canvas->print(t, 1);
+  canvas->print("C");
+  canvas->setCursor(110, 100);
+  canvas->print(h, 0);
+  canvas->print("%");
+  canvas->setCursor(30, 125);
+  canvas->print("HI:");
+  canvas->print(hiC, 1);
+
+  float p = bmp.readPressure();
+  snprintf(buffer, sizeof(buffer), "%.0fPa", p);
+  canvas->setCursor(40, 65);
+  canvas->print(buffer);
+
+  float altitude = bmp.readAltitude(1013.25);
+  snprintf(buffer, sizeof(buffer), "%.0fm", altitude);
+  canvas->setCursor(150, 65);
+  canvas->print(buffer);
+
+  applyCircularMask(canvas);
+}
+
+
+void displaySpaceTimeDistortion() {
+  GFXcanvas16 *canvas = arcada.getCanvas();
+  canvas->fillScreen(BACKGROUND_COLOR);
+  canvas->setTextSize(3);
+  canvas->setTextColor(TITLE_COLOR);
+  canvas->setCursor(115, 25);
+  canvas->print("R");
+  sensors_event_t magEvent;
+  mag.getEvent(&magEvent);
+  float mx = magEvent.magnetic.x;
+  float my = magEvent.magnetic.y;
+  float mz = magEvent.magnetic.z;
+  float heading = atan2(my, mx);
+  if (heading < 0) heading += 2*PI;
+  sensors_event_t accelEvent;
+  lsm6ds33.getEvent(&accelEvent, NULL, NULL);
+  float ax = accelEvent.acceleration.x;
+  float ay = accelEvent.acceleration.y;
+  float az = accelEvent.acceleration.z;
+  float accelMag = sqrt(ax*ax + ay*ay + az*az);
+  float roll = atan2(ay, az) * 180.0 / PI;
+  if (roll < 0) roll += 360;
+  uint16_t r, g, b, c;
+  apds.getColorData(&r, &g, &b, &c);
+  float flux = sqrt(mx*mx + my*my + mz*mz);
+  float fluxNorm = constrain(flux, 0, 150) / 150.0;
+  int cols = 12;
+  int rows = 10;
+  int spacingX = ARCADA_TFT_WIDTH / (cols + 1);
+  int spacingY = ARCADA_TFT_HEIGHT / (rows + 1);
+  int circleRadius = 8;
+  for (int i = 1; i <= cols; i++) {
+    for (int j = 1; j <= rows; j++) {
+      int baseX = i * spacingX;
+      int baseY = j * spacingY;
+      float offsetX = 8 * sin(millis()/1000.0 + baseX/30.0 + heading) * (accelMag / 10.0);
+      float offsetY = 8 * cos(millis()/1000.0 + baseY/30.0 + heading) * (accelMag / 10.0);
+      int circleX = baseX + (int)offsetX;
+      int circleY = baseY + (int)offsetY;
+      uint16_t color = HSVtoRGB((uint16_t)roll, 255, (uint8_t)(fluxNorm * 255));
+      canvas->drawCircle(circleX, circleY, circleRadius, color);
+    }
+  }
+  applyCircularMask(canvas);
+}
+
+// ----- [MODIFIED] Mode 6: MLX90640 IR Camera Display Function -----
+// Adjustments:
+//   - Increased interpolation resolution (see INTERPOLATED_WIDTH/HEIGHT)
+//   - Flipped the image horizontally (by inverting j)
+//   - Used ceil(...) for fillRect dimensions to reduce grid effects
+//   - Removed the circular mask so the full image is visible
+//   - Moved the min and max temperature labels to the middle of the screen
+void displayMLX90640() {
+  GFXcanvas16 *canvas = arcada.getCanvas();
+  if (!mlx_connected) {
+    canvas->fillScreen(ARCADA_BLACK);
+    canvas->setTextSize(2);
+    canvas->setTextColor(TITLE_COLOR);
+    canvas->setCursor(10, canvas->height()/2);
+    canvas->print("MLX90640 Not Connected");
+  } else {
+    mlx.getFrame(mlxFrame);
+    float minTemp = mlxFrame[0], maxTemp = mlxFrame[0];
+    for (int i = 1; i < 32 * 24; i++) {
+      if (mlxFrame[i] < minTemp) minTemp = mlxFrame[i];
+      if (mlxFrame[i] > maxTemp) maxTemp = mlxFrame[i];
+    }
+    interpolateThermalImage(mlxFrame, 32, 24, INTERPOLATED_WIDTH, INTERPOLATED_HEIGHT, mlxInterpolatedFrame);
+    float xScale = (float)ARCADA_TFT_WIDTH / INTERPOLATED_WIDTH;
+    float yScale = (float)ARCADA_TFT_HEIGHT / INTERPOLATED_HEIGHT;
+    for (int i = 0; i < INTERPOLATED_HEIGHT; i++) {
+      for (int j = 0; j < INTERPOLATED_WIDTH; j++) {
+        int index = i * INTERPOLATED_WIDTH + j;
+        float t = mlxInterpolatedFrame[index];
+        int pixelVal = (int)mapf(t, minTemp, maxTemp, 0, 255);
+        if (pixelVal < 0) pixelVal = 0;
+        if (pixelVal > 255) pixelVal = 255;
+        // Color mapping with byte-swap to match display
+        uint16_t color = __builtin_bswap16(myColor565((uint8_t)pixelVal, 0, (uint8_t)(255 - pixelVal)));
+        // Flip horizontally by drawing in reverse order
+        int16_t x = (INTERPOLATED_WIDTH - j - 1) * xScale;
+        int16_t y = i * yScale;
+        // Use ceil to avoid gaps between drawn rectangles (reducing the grid appearance)
+        int16_t rectWidth = ceil(xScale);
+        int16_t rectHeight = ceil(yScale);
+        canvas->fillRect(x, y, rectWidth, rectHeight, color);
+      }
+    }
+    // [MODIFIED] Display min and max temperatures near the middle of the screen.
+    char minLabel[20];
+    char maxLabel[20];
+    snprintf(minLabel, sizeof(minLabel), "< %.1f", minTemp);
+    snprintf(maxLabel, sizeof(maxLabel), "> %.1f", maxTemp);
+    int minLabelWidth = strlen(minLabel) * 12;
+    int maxLabelWidth = strlen(maxLabel) * 12;
+    int xMin = (ARCADA_TFT_WIDTH - minLabelWidth) / 2;
+    int xMax = (ARCADA_TFT_WIDTH - maxLabelWidth) / 2;
+    int yMin = ARCADA_TFT_HEIGHT / 2 - 20;
+    int yMax = ARCADA_TFT_HEIGHT / 2 + 10;
+    canvas->setTextSize(2);
+    canvas->setTextColor(TITLE_COLOR);
+    canvas->setCursor(xMin, yMin);
+    canvas->print(minLabel);
+    canvas->setCursor(xMax, yMax);
+    canvas->print(maxLabel);
+    // Do not apply the circular mask so the full image is displayed.
+    // applyCircularMask(canvas);
+  }
+}
+
+// ---------------- Callback Functions for BLE ----------------
+
+void bleuart_rx_callback(BLEClientUart& uart_svc) {
+  byte i = 0;
+  char temp[11] = "          ";
+  while (uart_svc.available() && i < 10) {
+    temp[i] = uart_svc.read();
+    i++;
+  }
+  eco2_val = 10000 * (temp[0] - '0') + 1000 * (temp[1] - '0') +
+             100 * (temp[2] - '0') + 10 * (temp[3] - '0') + (temp[4] - '0');
+  voc_val  = 10000 * (temp[5] - '0') + 1000 * (temp[6] - '0') +
+             100 * (temp[7] - '0') + 10 * (temp[8] - '0') + (temp[9] - '0');
+}
+
+void connect_callback(uint16_t conn_handle) {
+  if (clientDis.discover(conn_handle)) {
+    char buffer[33];
+    memset(buffer, 0, sizeof(buffer));
+    if (clientDis.getManufacturer(buffer, sizeof(buffer))) {
+      Serial.println(buffer);
+    }
+    memset(buffer, 0, sizeof(buffer));
+    if (clientDis.getModel(buffer, sizeof(buffer))) {
+      Serial.println(buffer);
+    }
+  } else {
+    Serial.println("Device information discovery failed!");
+  }
+  if (clientBas.discover(conn_handle)) {
+    Serial.println("Battery service discovered!");
+  } else {
+    Serial.println("Battery service discovery failed!");
+  }
+  if (clientUart.discover(conn_handle)) {
+    clientUart.enableTXD();
+    Serial.println("UART service discovered!");
+  } else {
+    Serial.println("UART service discovery failed!");
+    Bluefruit.disconnect(conn_handle);
+  }
+}
+
+void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
+  Serial.print("Disconnected, reason = ");
+  Serial.println(reason);
+}
+
+void scan_callback(ble_gap_evt_adv_report_t* report) {
+  if (Bluefruit.Scanner.checkReportForService(report, clientUart)) {
+    Bluefruit.Central.connect(report);
+  } else {
+    Bluefruit.Scanner.resume();
+  }
+}
+
+// ---------------- Setup and Main Loop ----------------
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Multi-Sensor Scrolling Plotter Demo with BLE Sensor Mode (Bluefruit)");
+
+  if (!arcada.arcadaBegin()) {
+    Serial.println("Failed to begin Arcada");
+    while (1) delay(10);
+  }
+  arcada.displayBegin();
+  arcada.setBacklight(255);
+  if (!arcada.createFrameBuffer(ARCADA_TFT_WIDTH, ARCADA_TFT_HEIGHT)) {
+    Serial.println("Failed to allocate framebuffer");
+    while (1);
+  }
+  
+  if (!bmp.begin()) { Serial.println("BMP280 not found!"); }
+  if (!sht.begin(0x44)) { Serial.println("SHT31 not found!"); }
+  if (!apds.begin()) { Serial.println("APDS9960 not found!"); }
+  else {
+    apds.enableColor(true);
+    apds.enableProximity(true);
+  }
+  if (!mag.begin_I2C()) { Serial.println("Magnetometer not found!"); }
+  if (!lsm6ds33.begin_I2C()) {
+    Serial.println("LSM6DS33 not found!");
+  } else {
+    sensors_event_t accelEvent, gyroEvent, tempEvent;
+    lsm6ds33.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+    prevAx = accelEvent.acceleration.x;
+    prevAy = accelEvent.acceleration.y;
+    prevAz = accelEvent.acceleration.z;
+    hpAx = 0; hpAy = 0; hpAz = 0;
+    lsmInitialized = true;
+  }
+  
+  PDM.onReceive([]() {
+    int bytesAvailable = PDM.available();
+    PDM.read(sampleBuffer, bytesAvailable);
+    samplesRead = bytesAvailable / 2;
+  });
+  if (!PDM.begin(1, 16000)) {
+    Serial.println("Failed to start PDM!");
+  }
+  
+  Bluefruit.begin(0, 1);
+  Bluefruit.setName("Bluefruit52 Central");
+  clientBas.begin();
+  clientDis.begin();
+  clientUart.begin();
+  clientUart.setRxCallback(bleuart_rx_callback);
+  Bluefruit.setConnLedInterval(250);
+  Bluefruit.Central.setConnectCallback(connect_callback);
+  Bluefruit.Central.setDisconnectCallback(disconnect_callback);
+  Bluefruit.Scanner.setRxCallback(scan_callback);
+  Bluefruit.Scanner.restartOnDisconnect(true);
+  Bluefruit.Scanner.setInterval(160, 80);
+  Bluefruit.Scanner.useActiveScan(false);
+  
+  pinMode(WHITE_LED, OUTPUT);
+  digitalWrite(WHITE_LED, LOW);
+  
+  // Initialize the buzzer pin for button beeps.
+  pinMode(BUZZER_PIN, OUTPUT);
+  
+  lightBuffer.clear();
+  redBuffer.clear();
+  greenBuffer.clear();
+  blueBuffer.clear();
+  
+  currentDB = 0;
+  minDB = 1000.0;
+  maxDB = 0;
+  lastSampleTime = millis();
+  
+  currentMode = 0;
+  Serial.println("Modes:");
+  Serial.println(" 0 = Radial Moiré Pattern");
+  Serial.println(" 1 = Light Intensity");
+  Serial.println(" 2 = Colorimeter");
+  Serial.println(" 3 = dB Meter");
+  Serial.println(" 4 = Env Sensor (eCO2, TVOC, Temp, Humidity, HI, Pressure)");
+  Serial.println(" 5 = Space-Time Distortion");
+  Serial.println(" 6 = MLX90640 IR Camera");
+  
+  if (!mlx.begin()) {
+    Serial.println("MLX90640 not found. Mode 6 will show 'Not Connected'.");
+    mlx_connected = false;
+  } else {
+    mlx_connected = true;
+  }
+  
+  globalWidth = arcada.getCanvas()->width();
+  globalHeight = arcada.getCanvas()->height();
+  globalCx = globalWidth / 2;
+  globalCy = globalHeight / 2;
+  globalMaxR = sqrt(globalWidth * globalWidth + globalHeight * globalHeight);
+  globalAngleStep = 360.0 / NUM_RADIAL_LINES;
+  
+  for (int i = 0; i < 360; i++){
+    float rad = i * DEG2RAD;
+    sinLUT[i] = sin(rad);
+    cosLUT[i] = cos(rad);
+  }
+}
+
+void loop() {
+  // Read the button states.
+  arcada.readButtons();
+  uint8_t buttons = arcada.justPressedButtons();
+  
+  // If any button was pressed, play beepPattern2.
+  if (buttons) {
+    beepPattern2();
+  }
+  
+  if (buttons & (ARCADA_BUTTONMASK_RIGHT | ARCADA_BUTTONMASK_LEFT)) {
+    lastModeChangeTime = millis();
+  }
+  
+  if (buttons & ARCADA_BUTTONMASK_RIGHT) {
+    currentMode++;
+    if (currentMode > 6) currentMode = 0;
+    digitalWrite(WHITE_LED, LOW);
+    arcada.display->fillScreen(ARCADA_BLACK);
+    delay(200);
+  }
+  
+  if (buttons & ARCADA_BUTTONMASK_LEFT) {
+    currentMode--;
+    if (currentMode < 0) currentMode = 6;
+    digitalWrite(WHITE_LED, LOW);
+    arcada.display->fillScreen(ARCADA_BLACK);
+    delay(200);
+  }
+  
+  if (currentMode != prevMode) {
+    if (currentMode == 3) {
+      maxDB = 0;
+      minDB = 1000.0;
+    }
+    prevMode = currentMode;
+  }
+  
+  if (buttons & ARCADA_BUTTONMASK_UP) {
+    int16_t newBrightness = arcada.getBacklight();
+    newBrightness = min(255, newBrightness + 25);
+    Serial.printf("New brightness: %d\n", newBrightness);
+    arcada.setBacklight(newBrightness, true);
+  }
+  
+  if (buttons & ARCADA_BUTTONMASK_DOWN) {
+    int16_t newBrightness = arcada.getBacklight();
+    newBrightness = max(25, newBrightness - 25);
+    Serial.printf("New brightness: %d\n", newBrightness);
+    arcada.setBacklight(newBrightness, true);
+  }
+  
+  if (currentMode == 4) {
+    if (!Bluefruit.Scanner.isRunning()) {
+      Bluefruit.Scanner.start(0);
+    }
+  } else {
+    if (Bluefruit.Scanner.isRunning()) {
+      Bluefruit.Scanner.stop();
+    }
+  }
+  
+  uint32_t now = millis();
+  if (now - lastSampleTime >= DELAY_PER_SAMPLE) {
+    lastSampleTime = now;
+    if (currentMode == 1) {
+      uint16_t r, g, b, c;
+      apds.getColorData(&r, &g, &b, &c);
+      float lux = (float)c * 0.1;
+      lightBuffer.push(lux);
+    } else if (currentMode == 2) {
+      #define PROX_THRESHOLD 50
+      uint8_t prox = apds.readProximity();
+      if (prox > PROX_THRESHOLD) {
+        digitalWrite(WHITE_LED, HIGH);
+      } else {
+        digitalWrite(WHITE_LED, LOW);
+      }
+      while (!apds.colorDataReady()) {
+        delay(5);
+      }
+      uint16_t r, g, b, c;
+      apds.getColorData(&r, &g, &b, &c);
+      redBuffer.push((float)r);
+      greenBuffer.push((float)g);
+      blueBuffer.push((float)b);
+    } else if (currentMode == 3) {
+      int32_t waveAmplitude = 0;
+      int32_t localMin = 32767;
+      int32_t localMax = -32768;
+      int32_t samplesToRead = 4000;
+      while (samplesToRead > 0) {
+        if (!samplesRead) {
+          yield();
+          continue;
+        }
+        for (int i = 0; i < samplesRead && samplesToRead > 0; i++, samplesToRead--) {
+          localMin = min(sampleBuffer[i], localMin);
+          localMax = max(sampleBuffer[i], localMax);
+        }
+        samplesRead = 0;
+      }
+      waveAmplitude = localMax - localMin;
+      if (waveAmplitude <= 0) waveAmplitude = 1;
+      currentDB = 25 * log10((double)waveAmplitude);
+      if (currentDB < minDB) minDB = currentDB;
+      if (currentDB > maxDB) maxDB = currentDB;
+      if (currentDB > 40.0) {
+        addBlipDB(currentDB);
+      }
+      updateBlipsDB();
+      
+      sweepAngle += sweepSpeed;
+      if (sweepAngle >= 360.0) sweepAngle -= 360.0;
+      if (sweepAngle < 0) sweepAngle += 360.0;
+      
+      displayDBMeter();
+    }
+  }
+  
+  if (currentMode == 0) {
+    displayRadialMoire();
+  } else if (currentMode == 1) {
+    displayCircularLuxGauge();
+  } else if (currentMode == 2) {
+    plotColorBuffer(arcada.getCanvas(), redBuffer, greenBuffer, blueBuffer, "Lamda");
+  } else if (currentMode == 4) {
+    displayBTData();
+  } else if (currentMode == 5) {
+    displaySpaceTimeDistortion();
+  } else if (currentMode == 6) {
+    displayMLX90640();
+  }
+  
+  arcada.blitFrameBuffer(0, 0, false, true);
+  yield();
+}
