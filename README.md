@@ -12,7 +12,7 @@ There are FIVE versions;
 3. Integrates the Moiré animated GIF, 9 internal sensors, the **MLX90640**, and Bluetooth to communicate with the Handheld sensors (SGP30 connected to the ItsyBitsy nRF52840 Express).
 4. Integrates the Moiré animated GIF, 9 internal sensors, the **MLX90640** (interpolated), and Bluetooth to communicate with the Handheld sensors (SGP30 connected to the ItsyBitsy nRF52840 Express), and button beeps.
 5. Moiré animated GIF is NO LONGER NEEDED!
-   Mode0 - Moiré is now functional by connecting it to the magnetometer!
+   Mode0 - Moiré is now functional by connecting it to the magnetometer! Check out my video that shows this - https://youtu.be/L1sdvRsTv_E
    Mode1 - Light meter displayed in LUX
    Mode2 - Lambda is the same EXCEPT the white LED now only comes on when about a CM away from the sensor... so it doesn't blind you every time you go to that screen!
    Mode3 - dB meter is now nicer looking with a Sensor Sweep/Radar looking screen. Red dots appear as sound is detected with a circular "grid" that shows dB
@@ -32,3 +32,5 @@ This sketch originated from Adafruit's Clue Sensor Plotter example (https://gith
 Versions 1 - 4 integration of the Moire pattern, AMG8833 thermal camera, and Bluetooth was done by notSpock on The Fleet Workshop. Thank you, sir!!
 
 The integration of the MLX90640 and most of Version 5 was created with the help of ChatGPT. Thanks to those folks who made that AI quite useful to me!
+
+Don't forget to subscribe to my YouTube channel so you can keep up with all the updates I make on the Tricorder! https://www.youtube.com/OldBlackCrowCS
